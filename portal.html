@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>新東方數據平台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  background:#f5f5f0;color:#2c2c2a;padding:40px 20px}
+.wrap{max-width:720px;margin:0 auto}
+.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;
+  flex-wrap:wrap;gap:12px}
+h1{font-size:22px;font-weight:600}
+.user{font-size:13px;color:#888}
+.user strong{color:#2c2c2a;font-weight:500}
+.user a{color:#1d9e75;text-decoration:none;margin-left:12px}
+.user a:hover{text-decoration:underline}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}
+.card{background:#fff;border-radius:12px;padding:28px 24px;
+  box-shadow:0 1px 8px rgba(0,0,0,.06);text-decoration:none;color:inherit;
+  transition:transform .15s,box-shadow .15s;display:block}
+.card:hover{transform:translateY(-2px);box-shadow:0 4px 20px rgba(0,0,0,.1)}
+.icon{font-size:28px;margin-bottom:12px}
+.card h2{font-size:16px;font-weight:500;margin-bottom:6px}
+.card p{font-size:13px;color:#888;line-height:1.5}
+.badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:4px;
+  background:#e1f5ee;color:#0f6e56;margin-bottom:16px}
+.hidden{display:none}
+.loading,.empty,.error{text-align:center;padding:60px;color:#888;font-size:14px}
+.error{color:#e24b4a}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>新東方數據平台</h1>
+    <div class="user">
+      <span id="greet"></span>
+      <a href="/auth/logout">登出</a>
+    </div>
+  </div>
+  <div id="loading" class="loading">載入中…</div>
+  <div id="error"   class="error hidden"></div>
+  <div id="apps"    class="grid hidden"></div>
+</div>
+<script>
+// 所有可用應用（新增項目只需加一條；path 要以 / 開頭）
+const APPS = [
+  {path:"/finance/", icon:"📊", name:"財務數據分析", desc:"營收、利潤、現金流等財務報表", tag:"Finance"},
+  {path:"/product/", icon:"📦", name:"產品數據分析", desc:"產品銷售、轉化率、用戶行為",     tag:"Product"},
+  // 新項目加這裡，例如:
+  // {path:"/hr/", icon:"👥", name:"人力資源", desc:"員工數據...", tag:"HR"},
+];
+
+// 嚴格邊界匹配，跟後端 path_allowed 保持一致
+function isAllowed(appPath, allowed) {
+  const p = appPath.replace(/\/$/, "");  // 移除尾 /
+  return allowed.some(a => {
+    const ap = a.replace(/\/$/, "");
+    return p === ap || p.startsWith(ap + "/");
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+}
+
+function showError(msg) {
+  document.getElementById("loading").classList.add("hidden");
+  const el = document.getElementById("error");
+  el.textContent = msg;
+  el.classList.remove("hidden");
+}
+
+fetch("/auth/me", {credentials: "same-origin"})
+  .then(r => {
+    if (r.status === 401) { location.href = "/auth/login"; return null; }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  })
+  .then(d => {
+    if (!d) return;
+
+    document.getElementById("greet").innerHTML =
+      "<strong>" + escapeHtml(d.display_name || d.username) + "</strong>" +
+      " <span>(" + escapeHtml(d.role) + ")</span>";
+
+    const grid = document.getElementById("apps");
+    const allowed = Array.isArray(d.allowed) ? d.allowed : [];
+    let count = 0;
+
+    APPS.forEach(a => {
+      if (!isAllowed(a.path, allowed)) return;
+      count++;
+      const el = document.createElement("a");
+      el.className = "card";
+      el.href = a.path;
+      el.innerHTML =
+        '<div class="icon">'  + a.icon + '</div>' +
+        '<div class="badge">' + escapeHtml(a.tag)  + '</div>' +
+        '<h2>'                + escapeHtml(a.name) + '</h2>' +
+        '<p>'                 + escapeHtml(a.desc) + '</p>';
+      grid.appendChild(el);
+    });
+
+    if (count === 0) {
+      grid.innerHTML = '<p class="empty" style="grid-column:1/-1">' +
+        '你的帳號目前沒有可查看的報表，請聯繫管理員</p>';
+    }
+
+    document.getElementById("loading").classList.add("hidden");
+    grid.classList.remove("hidden");
+  })
+  .catch(err => {
+    console.error(err);
+    showError("載入失敗，請重新整理頁面或聯繫管理員");
+  });
+</script>
+</body>
+</html>
