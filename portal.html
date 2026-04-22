@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<title>新東方數據平台</title>
+<title>广州前途数据平台</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
@@ -35,21 +35,21 @@ h1{font-size:22px;font-weight:600}
 <body>
 <div class="wrap">
   <div class="head">
-    <h1>新東方數據平台</h1>
+    <h1>广州前途数据平台</h1>
     <div class="user">
       <span id="greet"></span>
       <a href="/auth/logout">登出</a>
     </div>
   </div>
-  <div id="loading" class="loading">載入中…</div>
+  <div id="loading" class="loading">加载中…</div>
   <div id="error"   class="error hidden"></div>
   <div id="apps"    class="grid hidden"></div>
 </div>
 <script>
 // 所有可用應用（新增項目只需加一條；path 要以 / 開頭）
 const APPS = [
-  {path:"/finance/", icon:"📊", name:"財務數據分析", desc:"營收、利潤、現金流等財務報表", tag:"Finance"},
-  {path:"/product/", icon:"📦", name:"產品數據分析", desc:"產品銷售、轉化率、用戶行為",     tag:"Product"},
+  {path:"/finance/", icon:"📊", name:"财务数据分析", desc:"营收、利润、现金流等财务报表", tag:"Finance"},
+  {path:"/product/", icon:"📦", name:"产品数据分析", desc:"产品销售、转化率、用户行为",     tag:"Product"},
   // 新項目加這裡，例如:
   // {path:"/hr/", icon:"👥", name:"人力資源", desc:"員工數據...", tag:"HR"},
 ];
@@ -109,7 +109,7 @@ fetch("/auth/me", {credentials: "same-origin"})
 
     if (count === 0) {
       grid.innerHTML = '<p class="empty" style="grid-column:1/-1">' +
-        '你的帳號目前沒有可查看的報表，請聯繫管理員</p>';
+        '你的帐号目前没有可查看的报表，请联系管理员</p>';
     }
 
     document.getElementById("loading").classList.add("hidden");
@@ -117,7 +117,7 @@ fetch("/auth/me", {credentials: "same-origin"})
   })
   .catch(err => {
     console.error(err);
-    showError("載入失敗，請重新整理頁面或聯繫管理員");
+    showError("载入失败，请重新整理页面或联系管理员");
   });
 </script>
 </body>

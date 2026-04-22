@@ -187,7 +187,7 @@ def record_fail(ip: str):
 def login_page(req: Request, error: str = ""):
     if get_session(req):
         return RedirectResponse("/portal", 302)
-    msg = {"rate": "嘗試過多，請稍後再試"}.get(error, "帳號或密碼錯誤" if error else "")
+    msg = {"rate": "尝试过多，请稍后再试"}.get(error, "帐号或密码错误" if error else "")
     err_html = f'<p class="err">{msg}</p>' if msg else ""
     return LOGIN_HTML.replace("{{ERROR}}", err_html)
 
@@ -331,7 +331,7 @@ def health():
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="zh-Hant">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>新東方數據平台 · 登入</title>
+<title>广州前途数据平台 · 登入</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{min-height:100vh;display:flex;align-items:center;justify-content:center;
@@ -352,10 +352,10 @@ button:hover{background:#0f6e56}
 .err{color:#e24b4a;margin:0 0 12px;font-size:13px}
 </style></head>
 <body><div class="card">
-<h1>新東方數據平台</h1><p class="sub">Data Analytics Portal</p>
+<h1>广州前途数据平台</h1><p class="sub">Data Analytics Portal</p>
 {{ERROR}}
 <form method="POST" action="/auth/login" autocomplete="on">
-<label>帳號</label><input name="username" type="text" required autofocus autocomplete="username">
-<label>密碼</label><input name="password" type="password" required autocomplete="current-password">
+<label>帐号</label><input name="username" type="text" required autofocus autocomplete="username">
+<label>密码</label><input name="password" type="password" required autocomplete="current-password">
 <button type="submit">登 入</button>
 </form></div></body></html>"""
