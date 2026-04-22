@@ -19,6 +19,7 @@ Auth Gateway API — 統一認證閘道（整合版 v2）
 import os
 import sys
 import time
+import json
 import logging
 from typing import Optional
 from urllib.parse import quote
@@ -116,12 +117,25 @@ def resolve_finance(user: dict) -> Optional[dict]:
 
     規則:
       1. 顯式配 finance.role → 使用該配置
+         - SCOPED 必須帶非空 scope dict（否則降級為 None）
       2. Gateway role ∈ {admin, manager} 且未配 → 預設 ADMIN（看全部）
       3. advisor 未顯式配 → None（配置錯誤，下游擋住）
       4. 其他 role → None（不該訪問 /finance）
     """
     fin = user.get("finance")
     if isinstance(fin, dict) and fin.get("role"):
+        role = str(fin.get("role", "")).upper()
+        if role == "SCOPED":
+            scope = fin.get("scope") or {}
+            # scope 必須是 dict 且至少有一個非空維度
+            if not isinstance(scope, dict):
+                return None
+            has_any = any(
+                isinstance(v, (list, tuple)) and any(str(x).strip() for x in v)
+                for v in scope.values()
+            )
+            if not has_any:
+                return None
         return fin
     gw_role = user.get("role", "")
     if gw_role in ("admin", "manager"):
@@ -281,11 +295,21 @@ def check(req: Request):
         resp.headers["X-Auth-Role"] = (fin.get("role") or "").upper()
         resp.headers["X-Auth-Dept-Scope"] = quote(fin.get("dept_scope") or "", safe="")
         resp.headers["X-Auth-Advisor-Name"] = quote(fin.get("advisor_name") or "", safe="")
+        # v3: SCOPED 多維白名單 → URL-encoded JSON
+        scope = fin.get("scope")
+        if scope and isinstance(scope, dict):
+            resp.headers["X-Auth-Scope"] = quote(
+                json.dumps(scope, ensure_ascii=False, separators=(",", ":")),
+                safe="",
+            )
+        else:
+            resp.headers["X-Auth-Scope"] = ""
     else:
         # 無 finance 權限，空字串 → FastAPI 會以缺 header 拒絕
         resp.headers["X-Auth-Role"] = ""
         resp.headers["X-Auth-Dept-Scope"] = ""
         resp.headers["X-Auth-Advisor-Name"] = ""
+        resp.headers["X-Auth-Scope"] = ""
 
     return resp
 
@@ -315,6 +339,7 @@ def me(req: Request):
             "role": (fin.get("role") if fin else None),
             "dept_scope": (fin.get("dept_scope") if fin else None),
             "advisor_name": (fin.get("advisor_name") if fin else None),
+            "scope": (fin.get("scope") if fin else None),  # v3: SCOPED 用
         } if fin else None,
     }
 

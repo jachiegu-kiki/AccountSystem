@@ -12,13 +12,16 @@
 
   # Finance 細粒度權限（數據層）
   set-finance <username> <ADMIN|MANAGER|ADVISOR> [--dept <d>] [--advisor <a>]
+  set-finance-scope <username> [--line a,b,..] [--sub-line ...]
+                               [--biz-block a,b,..] [--group-l1 ...]
+                               [--group-advisor ...] [--biz-type 留学,多语]
   unset-finance <username>
 
   # 查看
   list
 
 Gateway role (gw_role):  admin / manager / consultant / advisor / viewer
-Finance role:            ADMIN / MANAGER / ADVISOR
+Finance role:            ADMIN / MANAGER / ADVISOR / SCOPED
 
 範例:
   # 部門經理：只看留學二部
@@ -28,6 +31,10 @@ Finance role:            ADMIN / MANAGER / ADVISOR
   # 顧問老師：只看自己那行
   add wang - advisor 王老師
   set-finance wang ADVISOR --advisor 王曉明
+
+  # 多維範圍（SCOPED）：吳嘉恒看歐亞板塊
+  add wujiaheng ouya2026 manager 吳嘉恒
+  set-finance-scope wujiaheng --line 欧洲,亚洲 --biz-block 欧亚,外包
 
   # 老闆：gateway manager + 看全公司數據（預設推導，不用 set-finance）
   add boss - manager 老闆
@@ -45,7 +52,8 @@ YAML_PATH = os.environ.get(
     "/app/users.yaml" if os.path.exists("/app/users.yaml") else "users.yaml"
 )
 VALID_GW_ROLES = {"admin", "manager", "consultant", "advisor", "viewer"}
-VALID_FIN_ROLES = {"ADMIN", "MANAGER", "ADVISOR"}
+VALID_FIN_ROLES = {"ADMIN", "MANAGER", "ADVISOR", "SCOPED"}
+VALID_SCOPE_DIMS = {"line", "sub_line", "biz_block", "group_l1", "group_advisor", "biz_type"}
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]{2,32}$")
 
 
@@ -256,20 +264,69 @@ def cmd_unset_finance(args):
         print(f"ℹ {user} 原本就沒有 finance 設定")
 
 
+def cmd_set_finance_scope(args):
+    """設定多維度白名單（SCOPED 角色）
+    用法: set-finance-scope <username> [--line a,b,..] [--sub-line ...]
+                                        [--biz-block a,b,..] [--group-l1 ...]
+                                        [--group-advisor ...] [--biz-type 留学,多语]
+    第一性原理: scope 即「能看哪些 row」的多維謂詞，YAML 存的是白名單清單。
+    """
+    flag_map = {
+        "--line":           "line",
+        "--sub-line":       "sub_line",
+        "--biz-block":      "biz_block",
+        "--group-l1":       "group_l1",
+        "--group-advisor":  "group_advisor",
+        "--biz-type":       "biz_type",
+    }
+    positional, parsed = parse_flags(args, flag_map)
+    if len(positional) < 1:
+        print("用法: set-finance-scope <username> [--line a,b] [--biz-block a,b] ...")
+        print(f"支援維度: {', '.join(sorted(VALID_SCOPE_DIMS))}")
+        sys.exit(1)
+    user = positional[0]
+
+    scope = {}
+    for dim, raw in parsed.items():
+        vals = [v.strip() for v in raw.split(",") if v.strip()]
+        if vals:
+            scope[dim] = vals
+
+    if not scope:
+        print("✗ 至少要指定一個維度（例如 --line 欧洲,亚洲）"); sys.exit(1)
+
+    # biz_type 值合法性檢查（只允許 留学 / 多语）
+    if "biz_type" in scope:
+        bad = [v for v in scope["biz_type"] if v not in ("留学", "多语")]
+        if bad:
+            print(f"✗ biz_type 只允許 '留学' 或 '多语'，非法值: {bad}"); sys.exit(1)
+
+    cfg = load()
+    u = require_user(cfg, user)
+    u["finance"] = {"role": "SCOPED", "scope": scope}
+    save(cfg)
+    desc = ", ".join(f"{k}={v}" for k, v in scope.items())
+    print(f"✓ {user} 的 finance: role=SCOPED, {desc}")
+
+
 def cmd_list(_):
     cfg = load()
     print()
-    print(f"{'用戶名':<18} {'gw_role':<12} {'finance':<38} {'顯示名稱'}")
-    print("-" * 90)
+    print(f"{'用戶名':<18} {'gw_role':<12} {'finance':<50} {'顯示名稱'}")
+    print("-" * 100)
     for u in cfg["users"]:
         fin = u.get("finance")
         if fin:
-            parts = [f"role={fin.get('role')}"]
+            role = fin.get("role", "")
+            parts = [f"role={role}"]
             if fin.get("dept_scope"):    parts.append(f"dept={fin['dept_scope']}")
             if fin.get("advisor_name"):  parts.append(f"adv={fin['advisor_name']}")
+            if role == "SCOPED":
+                sc = fin.get("scope") or {}
+                for k, v in sc.items():
+                    parts.append(f"{k}={','.join(v)}" if isinstance(v, list) else f"{k}={v}")
             fin_str = ", ".join(parts)
         else:
-            # 預設推導顯示
             gw = u.get("role", "")
             if gw in ("admin", "manager"):
                 fin_str = "(default: ADMIN)"
@@ -277,7 +334,7 @@ def cmd_list(_):
                 fin_str = "⚠ advisor 缺 finance"
             else:
                 fin_str = "-"
-        print(f"{u['username']:<18} {u['role']:<12} {fin_str:<38} "
+        print(f"{u['username']:<18} {u['role']:<12} {fin_str:<50} "
               f"{u.get('display_name', '-')}")
     print(f"\n共 {len(cfg['users'])} 位用戶\n")
 
@@ -285,13 +342,14 @@ def cmd_list(_):
 # ── 入口 ────────────────────────────────────────────────────
 
 COMMANDS = {
-    "add":            cmd_add,
-    "passwd":         cmd_passwd,
-    "remove":         cmd_remove,
-    "chrole":         cmd_chrole,
-    "set-finance":    cmd_set_finance,
-    "unset-finance":  cmd_unset_finance,
-    "list":           cmd_list,
+    "add":                 cmd_add,
+    "passwd":              cmd_passwd,
+    "remove":              cmd_remove,
+    "chrole":              cmd_chrole,
+    "set-finance":         cmd_set_finance,
+    "set-finance-scope":   cmd_set_finance_scope,
+    "unset-finance":       cmd_unset_finance,
+    "list":                cmd_list,
 }
 
 if __name__ == "__main__":
