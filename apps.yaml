@@ -1,0 +1,52 @@
+# ═══════════════════════════════════════════════════════════════
+#  新東方數據平台 · 看板註冊表（單一真源）
+# ═══════════════════════════════════════════════════════════════
+#  第一性原理:
+#    • 每個看板 = 一個 YAML 區塊
+#    • nginx.conf 由此文件渲染生成（見 auth-api/render_nginx.py）
+#    • portal.html 的 APPS 清單由 /auth/apps 動態讀取
+#    • users.yaml 的 roles.<role>.paths 仍控制誰能訪問哪個看板
+#
+#  新增一個看板的流程:
+#    1. 在此文件 apps 下新增一個區塊
+#    2. bash deploy.sh            # 自動重渲染 nginx.conf 並重啟
+#    3. 在 users.yaml 的 roles 裡把新 path 授權給相應角色
+#
+#  每個欄位:
+#    id                 唯一識別（英數、底線、連字號）
+#    name               顯示名稱（portal 卡片標題）
+#    icon               emoji 或短字元
+#    desc               描述（portal 卡片副標）
+#    tag                badge 小標籤（portal 卡片右上）
+#    path               URL 前綴，必以 "/" 開頭和結尾
+#    upstream           後端服務地址（host:port，從 gateway 容器能到達）
+#    absolute_api_path  [可選] 若前端用絕對路徑 /xxx/ 直連 API，填此路徑
+#                       (目前 finance 前端的歷史遺留，新 app 建議不用)
+# ═══════════════════════════════════════════════════════════════
+
+apps:
+  - id: finance
+    name: 财务数据分析
+    icon: "📊"
+    desc: 营收、利润、现金流等财务报表
+    tag: Finance
+    path: /finance/
+    upstream: host.docker.internal:8771
+    absolute_api_path: /api/    # 前端 JS 寫死 /api/... → 也要代理到 finance
+
+  - id: product
+    name: 产品数据分析
+    icon: "📦"
+    desc: 产品销售、转化率、用户行为
+    tag: Product
+    path: /product/
+    upstream: host.docker.internal:8772
+
+  # 未來新增看板，複製上面格式即可。例：
+  # - id: hr
+  #   name: 人力資源
+  #   icon: "👥"
+  #   desc: 員工、薪酬、考勤數據
+  #   tag: HR
+  #   path: /hr/
+  #   upstream: host.docker.internal:8773

@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 應用代碼
 COPY main.py .
 COPY manage.py .
+COPY render_nginx.py .
 
 # 預設 healthcheck 端點（簡單 HTTP GET，不跑 I/O）
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=10s \

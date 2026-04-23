@@ -1,15 +1,19 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-#  新東方數據平台 · Auth Gateway 部署腳本
+#  新東方數據平台 · Auth Gateway 部署腳本 v3
 # ═══════════════════════════════════════════════════════════════
 #  用法:  bash deploy.sh
 #  前提:  服務器已裝 Docker + Docker Compose v2
 #
-#  修復後的變更:
-#    ✅ 不再在宿主機 pip install（避免 --break-system-packages 污染）
+#  v3 變更:
+#    ✅ 部署前從 apps.yaml 自動渲染 nginx.conf（無需 python3 在宿主機）
+#       渲染透過容器執行，宿主機零依賴
+#    ✅ 修改 apps.yaml 後 bash deploy.sh 即重新生效
+#
+#  v2 保留:
+#    ✅ 不在宿主機 pip install（避免 --break-system-packages 污染）
 #    ✅ 所有用戶管理都透過 docker compose exec 走容器
-#    ✅ 檢測 admin 的無效 hash 佔位符（PLACEHOLDER_…）並強制設密碼
-#    ✅ 提示下游服務用「雲安全組」保護，而不是綁 127.0.0.1（那是走不通的）
+#    ✅ 檢測 admin 的無效 hash 佔位符並強制設密碼
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -19,7 +23,7 @@ cd "$SCRIPT_DIR"
 C_CYAN='\033[36m'; C_GRN='\033[32m'; C_YEL='\033[33m'; C_RED='\033[31m'; C_OFF='\033[0m'
 
 echo "═══════════════════════════════════════════════════════════"
-echo "  新東方數據平台 · Auth Gateway 部署"
+echo "  新東方數據平台 · Auth Gateway 部署 v3"
 echo "═══════════════════════════════════════════════════════════"
 
 # ── 1. 檢查 Docker ──────────────────────────────────────────
@@ -50,42 +54,64 @@ else
     echo -e "${C_GRN}✓ .env 已存在，保留原值${C_OFF}"
 fi
 
-# ── 3. 提醒下游服務的網絡配置 ──────────────────────────────
+# ── 3. 確認 apps.yaml 存在 ─────────────────────────────────
+if [ ! -f "$SCRIPT_DIR/apps.yaml" ]; then
+    echo -e "${C_RED}✗ apps.yaml 不存在${C_OFF}"
+    echo "  看板註冊表由 apps.yaml 管理，請先建立該文件"
+    exit 1
+fi
+APPS_COUNT=$(grep -c '^  - id:' apps.yaml || echo 0)
+echo -e "${C_GRN}✓ apps.yaml 就緒（${APPS_COUNT} 個看板）${C_OFF}"
+
+# ── 4. 提醒下游服務的網絡配置 ──────────────────────────────
 cat <<'EOF'
 
 ┌──────────────────────────────────────────────────────────────┐
-│  ⚠  重要：下游服務（8771、8772）的網絡隔離                  │
-│                                                              │
-│  原先 README 建議綁 127.0.0.1:8771 — 這個方案走不通！        │
-│  因為 Docker 容器透過 host.docker.internal 過去時，連線是    │
-│  從 docker0 橋進宿主機的，綁 127.0.0.1 會被拒絕。            │
-│                                                              │
-│  正確做法二選一:                                              │
+│  ⚠  重要：下游服務（8771、8772、…）的網絡隔離               │
 │                                                              │
 │  【方案 A・推薦・最簡單】雲安全組保護                         │
 │    ▸ 下游綁 0.0.0.0:8771 / 0.0.0.0:8772（或 docker 預設）   │
 │    ▸ 雲服務器安全組「入站規則」只開 8770                     │
-│    ▸ 關閉 8771、8772 的公網入站                              │
+│    ▸ 關閉下游公網入站                                        │
 │                                                              │
 │  【方案 B・進階】下游加入 gw_net docker 網絡                 │
-│    ▸ 下游的 docker-compose 加:                               │
+│    ▸ 下游 docker-compose 加:                                 │
 │        networks: [gw_net]                                    │
 │      外層:                                                   │
 │        networks:                                             │
 │          gw_net:                                             │
 │            external: true                                    │
-│    ▸ 然後把 nginx.conf 裡 host.docker.internal:8771          │
-│      改成下游的 container_name:80                            │
+│    ▸ 然後把 apps.yaml 的 upstream 改成 <container_name>:80   │
 └──────────────────────────────────────────────────────────────┘
 
 EOF
 
-# ── 4. 構建並啟動 ─────────────────────────────────────────
+# ── 5. 構建映像 ─────────────────────────────────────────────
 echo "→ 構建 auth-api 映像..."
 docker compose build
 
+# ── 6. 從 apps.yaml 渲染 nginx.conf ──────────────────────────
+# 透過 auth-api 容器執行（宿主機不需要 python3 + pyyaml）
+echo "→ 從 apps.yaml 渲染 nginx.conf..."
+docker compose run --rm --no-deps --entrypoint python \
+    -v "$SCRIPT_DIR/apps.yaml:/work/apps.yaml:ro" \
+    -v "$SCRIPT_DIR:/out" \
+    auth-api /app/render_nginx.py /work/apps.yaml /out/nginx.conf
+echo -e "${C_GRN}✓ nginx.conf 已更新（$(wc -l < nginx.conf) 行）${C_OFF}"
+
+# ── 7. 啟動服務 ──────────────────────────────────────────────
 echo "→ 啟動 Gateway..."
 docker compose up -d
+# 對已跑中的 nginx 強制 reload（volumes 是 ro 掛載，docker 不會自動重啟）
+if docker ps --format '{{.Names}}' | grep -q '^gw_nginx$'; then
+    if docker compose exec -T gateway nginx -t >/dev/null 2>&1; then
+        docker compose exec -T gateway nginx -s reload >/dev/null 2>&1 && \
+            echo -e "${C_GRN}✓ nginx 已 reload${C_OFF}" || \
+            echo -e "${C_YEL}⚠ nginx reload 失敗${C_OFF}"
+    else
+        echo -e "${C_YEL}⚠ nginx -t 校驗失敗，請檢查 nginx.conf${C_OFF}"
+    fi
+fi
 
 # 等 auth-api 就緒（healthcheck 通過）
 echo -n "→ 等待 auth-api 就緒"
@@ -104,8 +130,8 @@ for i in $(seq 1 30); do
     fi
 done
 
-# ── 5. 設定 admin 密碼 ─────────────────────────────────────
-if grep -q 'PLACEHOLDER_PLEASE_RUN_DEPLOY_SH' users.yaml; then
+# ── 8. 設定 admin 密碼 ─────────────────────────────────────
+if [ -f users.yaml ] && grep -q 'PLACEHOLDER_PLEASE_RUN_DEPLOY_SH' users.yaml; then
     echo ""
     echo -e "${C_YEL}⚠  檢測到 admin 密碼尚未設定${C_OFF}"
     while true; do
@@ -125,7 +151,7 @@ if grep -q 'PLACEHOLDER_PLEASE_RUN_DEPLOY_SH' users.yaml; then
     unset ADMIN_PWD ADMIN_PWD2
 fi
 
-# ── 6. 顯示服務狀態與訪問方式 ──────────────────────────────
+# ── 9. 顯示服務狀態與訪問方式 ──────────────────────────────
 GW_PORT="$(grep -E '^GW_PORT=' "$ENV_FILE" 2>/dev/null | cut -d= -f2)"
 GW_PORT="${GW_PORT:-8770}"
 SERVER_IP="$(curl -s --max-time 3 ifconfig.me 2>/dev/null || echo 'YOUR_SERVER_IP')"
@@ -138,21 +164,23 @@ echo ""
 echo -e "  ${C_CYAN}入口:${C_OFF}  http://${SERVER_IP}:${GW_PORT}/"
 echo -e "  ${C_CYAN}登入:${C_OFF}  http://${SERVER_IP}:${GW_PORT}/auth/login"
 echo ""
+echo "  ── 新增看板 ──"
+echo "    1. 編輯 apps.yaml 加一個區塊"
+echo "    2. 編輯 users.yaml 把新 path 加入對應 roles"
+echo "    3. bash deploy.sh    # 自動重渲染 + reload"
+echo ""
 echo "  ── 日常管理（全部在容器內執行，宿主機無需裝 Python 依賴）──"
 echo ""
 echo "  ℹ  讀取類操作不加 -u：list"
 echo "  ℹ  寫入類操作要加 -u root：add / passwd / remove / chrole"
-echo "     （users.yaml 在容器內是 root 所有，預設 app user 無寫權）"
 echo ""
 echo "    docker compose exec          auth-api python /app/manage.py list"
 echo "    docker compose exec -u root  auth-api python /app/manage.py add boss P@ssw0rd manager 老闆"
-echo "    docker compose exec -u root  auth-api python /app/manage.py add teacher_wang - consultant 王老師   # '-' = 互動式輸入"
 echo "    docker compose exec -u root  auth-api python /app/manage.py passwd admin -"
 echo "    docker compose exec -u root  auth-api python /app/manage.py remove teacher_wang"
-echo "    docker compose exec -u root  auth-api python /app/manage.py chrole boss admin"
 echo ""
 echo "  ── 查看日誌 ──"
 echo ""
-echo "    docker compose logs -f auth-api    # 認證日誌（登入/失敗/403）"
+echo "    docker compose logs -f auth-api    # 認證日誌"
 echo "    docker compose logs -f gateway     # nginx 訪問日誌"
 echo ""

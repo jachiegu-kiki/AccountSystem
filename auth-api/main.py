@@ -1,19 +1,24 @@
 """
-Auth Gateway API — 統一認證閘道（整合版 v2）
+Auth Gateway API — 統一認證閘道（整合版 v3）
 ────────────────────────────────────────────────────────────────
-核心變更（相對 v1）:
-  • /auth/check   放行時回傳 X-Auth-* headers，供 nginx 透傳給下游
-  • /auth/me      額外回傳 finance 子節，供前端決定 UI
-  • 中文欄位（dept_scope / advisor_name / display_name）URL-encode
-    避免 nginx / 某些中間件對非 ASCII header value 的相容性問題
-  • 新增 finance 預設推導（admin/manager → ADMIN；advisor 必須顯式）
+相對 v2 變更:
+  • 新增 /auth/apps 端點 — 從 apps.yaml 讀取看板清單，按當前
+    用戶的 gw_role.paths 過濾，供 portal.html 動態渲染卡片
+  • 新增 X-Auth-Extras header — 把 users.yaml 裡 user.extras
+    的任意 JSON 編碼傳給下游（新看板無需動 gateway 代碼即可
+    攜帶自己的配置，例如 hr 看板的部門白名單）
+  • finance 專用 header (X-Auth-Role / Dept-Scope / Advisor-Name
+    / Scope) 完全保留，finance 應用不需要任何修改
 
-對下游 FastAPI 合約:
+對下游 FastAPI 合約（不變）:
   X-Auth-User           登入用戶名（ASCII）
-  X-Auth-Role           數據層角色 ADMIN / MANAGER / ADVISOR
+  X-Auth-Gw-Role        Gateway 層角色（除錯用）
+  X-Auth-Role           finance 數據層角色 ADMIN/MANAGER/ADVISOR/SCOPED
   X-Auth-Dept-Scope     URL-encoded 中文部門（僅 MANAGER 用）
   X-Auth-Advisor-Name   URL-encoded 中文顧問名（僅 ADVISOR 用）
+  X-Auth-Scope          URL-encoded JSON（SCOPED 用）
   X-Auth-Display-Name   URL-encoded 顯示名稱（可選）
+  X-Auth-Extras         URL-encoded JSON（通用，新看板自定義用）
 ────────────────────────────────────────────────────────────────
 """
 import os
@@ -48,6 +53,7 @@ if not SECRET or len(SECRET) < 32:
 COOKIE = "gw_sess"
 MAX_AGE = 86400 * 7
 YAML_PATH = os.environ.get("USERS_YAML", "/app/users.yaml")
+APPS_YAML_PATH = os.environ.get("APPS_YAML", "/app/apps.yaml")
 SER = URLSafeTimedSerializer(SECRET)
 
 
@@ -96,6 +102,37 @@ def load_cfg() -> dict:
         log.info("users.yaml reloaded: %d users, %d roles",
                  len(data.get("users", [])), len(data.get("roles", {})))
     return _cfg_cache["data"]
+
+
+# ── apps.yaml 載入（mtime 快取，結構與 users.yaml 類似）────────
+_apps_cache = {"mtime": 0.0, "data": None}
+
+
+def load_apps() -> list:
+    """讀取 apps.yaml，回傳 apps 陣列。缺文件時回傳空陣列並警告。"""
+    try:
+        mt = os.path.getmtime(APPS_YAML_PATH)
+    except OSError:
+        if _apps_cache["data"] is None:
+            log.warning("apps.yaml 不存在於 %s，/auth/apps 將回空清單", APPS_YAML_PATH)
+            _apps_cache["data"] = []
+        return _apps_cache["data"]
+
+    if mt != _apps_cache["mtime"]:
+        try:
+            with open(APPS_YAML_PATH, "r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
+            apps = raw.get("apps") or []
+            if not isinstance(apps, list):
+                apps = []
+            _apps_cache["data"] = apps
+            _apps_cache["mtime"] = mt
+            log.info("apps.yaml reloaded: %d apps", len(apps))
+        except yaml.YAMLError as e:
+            log.warning("apps.yaml parse error, keep cache: %s", e)
+            if _apps_cache["data"] is None:
+                _apps_cache["data"] = []
+    return _apps_cache["data"]
 
 
 # ── 權限判定（嚴格邊界）──────────────────────────────────────
@@ -287,15 +324,15 @@ def check(req: Request):
 
     resp = Response(status_code=200)
     resp.headers["X-Auth-User"] = username
-    resp.headers["X-Auth-Gw-Role"] = role           # Gateway 層角色（除錯用）
+    resp.headers["X-Auth-Gw-Role"] = role           # Gateway 層角色（除錯 / 通用）
     resp.headers["X-Auth-Display-Name"] = quote(display, safe="")
 
+    # ── finance 專用 header（保留完全兼容 kiki_DAta_Analysis）──
     fin = resolve_finance(user)
     if fin:
         resp.headers["X-Auth-Role"] = (fin.get("role") or "").upper()
         resp.headers["X-Auth-Dept-Scope"] = quote(fin.get("dept_scope") or "", safe="")
         resp.headers["X-Auth-Advisor-Name"] = quote(fin.get("advisor_name") or "", safe="")
-        # v3: SCOPED 多維白名單 → URL-encoded JSON
         scope = fin.get("scope")
         if scope and isinstance(scope, dict):
             resp.headers["X-Auth-Scope"] = quote(
@@ -305,11 +342,20 @@ def check(req: Request):
         else:
             resp.headers["X-Auth-Scope"] = ""
     else:
-        # 無 finance 權限，空字串 → FastAPI 會以缺 header 拒絕
         resp.headers["X-Auth-Role"] = ""
         resp.headers["X-Auth-Dept-Scope"] = ""
         resp.headers["X-Auth-Advisor-Name"] = ""
         resp.headers["X-Auth-Scope"] = ""
+
+    # ── 通用 extras（新看板可自由使用，users.yaml 的 user.extras dict）──
+    extras = user.get("extras")
+    if isinstance(extras, dict) and extras:
+        resp.headers["X-Auth-Extras"] = quote(
+            json.dumps(extras, ensure_ascii=False, separators=(",", ":")),
+            safe="",
+        )
+    else:
+        resp.headers["X-Auth-Extras"] = ""
 
     return resp
 
@@ -339,9 +385,46 @@ def me(req: Request):
             "role": (fin.get("role") if fin else None),
             "dept_scope": (fin.get("dept_scope") if fin else None),
             "advisor_name": (fin.get("advisor_name") if fin else None),
-            "scope": (fin.get("scope") if fin else None),  # v3: SCOPED 用
+            "scope": (fin.get("scope") if fin else None),
         } if fin else None,
     }
+
+
+@app.get("/auth/apps")
+def apps_endpoint(req: Request):
+    """
+    回傳當前登入用戶可見的看板清單（portal.html 動態渲染用）。
+    過濾邏輯：用戶 gw_role.paths 裡有哪些 app.path 前綴，就看到哪些。
+    與 /auth/check 的 path_allowed 使用相同邊界判定，保證一致性。
+    """
+    sess = get_session(req)
+    if not sess:
+        return Response(status_code=401)
+    try:
+        cfg = load_cfg()
+    except Exception as e:
+        log.exception("apps: load_cfg failed: %s", e)
+        return Response(status_code=500)
+
+    role = sess.get("r", "")
+    allowed = cfg.get("roles", {}).get(role, [])
+    apps_list = load_apps()
+
+    visible = []
+    for a in apps_list:
+        path = a.get("path")
+        if not path:
+            continue
+        if path_allowed(path, allowed):
+            visible.append({
+                "id":   a.get("id"),
+                "name": a.get("name", a.get("id")),
+                "desc": a.get("desc", ""),
+                "icon": a.get("icon", "📂"),
+                "tag":  a.get("tag", ""),
+                "path": path,
+            })
+    return visible
 
 
 @app.get("/auth/health")

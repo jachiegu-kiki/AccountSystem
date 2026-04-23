@@ -46,22 +46,8 @@ h1{font-size:22px;font-weight:600}
   <div id="apps"    class="grid hidden"></div>
 </div>
 <script>
-// 所有可用應用（新增項目只需加一條；path 要以 / 開頭）
-const APPS = [
-  {path:"/finance/", icon:"📊", name:"财务数据分析", desc:"营收、利润、现金流等财务报表", tag:"Finance"},
-  {path:"/product/", icon:"📦", name:"产品数据分析", desc:"产品销售、转化率、用户行为",     tag:"Product"},
-  // 新項目加這裡，例如:
-  // {path:"/hr/", icon:"👥", name:"人力資源", desc:"員工數據...", tag:"HR"},
-];
-
-// 嚴格邊界匹配，跟後端 path_allowed 保持一致
-function isAllowed(appPath, allowed) {
-  const p = appPath.replace(/\/$/, "");  // 移除尾 /
-  return allowed.some(a => {
-    const ap = a.replace(/\/$/, "");
-    return p === ap || p.startsWith(ap + "/");
-  });
-}
+/* v3: 看板清單改從 /auth/apps 動態讀取（由後端基於 apps.yaml + 當前用戶的
+   roles.paths 過濾後回傳）。新增看板不再需要改此文件。*/
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
@@ -76,49 +62,56 @@ function showError(msg) {
   el.classList.remove("hidden");
 }
 
-fetch("/auth/me", {credentials: "same-origin"})
-  .then(r => {
-    if (r.status === 401) { location.href = "/auth/login"; return null; }
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    return r.json();
-  })
-  .then(d => {
-    if (!d) return;
+async function load() {
+  try {
+    // 並行取 me + apps
+    const [meRes, appsRes] = await Promise.all([
+      fetch("/auth/me",   {credentials: "same-origin"}),
+      fetch("/auth/apps", {credentials: "same-origin"}),
+    ]);
+
+    if (meRes.status === 401 || appsRes.status === 401) {
+      location.href = "/auth/login";
+      return;
+    }
+    if (!meRes.ok)   throw new Error("me HTTP " + meRes.status);
+    if (!appsRes.ok) throw new Error("apps HTTP " + appsRes.status);
+
+    const me = await meRes.json();
+    const apps = await appsRes.json();
 
     document.getElementById("greet").innerHTML =
-      "<strong>" + escapeHtml(d.display_name || d.username) + "</strong>" +
-      " <span>(" + escapeHtml(d.role) + ")</span>";
+      "<strong>" + escapeHtml(me.display_name || me.username) + "</strong>" +
+      " <span>(" + escapeHtml(me.role) + ")</span>";
 
     const grid = document.getElementById("apps");
-    const allowed = Array.isArray(d.allowed) ? d.allowed : [];
-    let count = 0;
 
-    APPS.forEach(a => {
-      if (!isAllowed(a.path, allowed)) return;
-      count++;
+    apps.forEach(a => {
       const el = document.createElement("a");
       el.className = "card";
       el.href = a.path;
       el.innerHTML =
-        '<div class="icon">'  + a.icon + '</div>' +
-        '<div class="badge">' + escapeHtml(a.tag)  + '</div>' +
-        '<h2>'                + escapeHtml(a.name) + '</h2>' +
-        '<p>'                 + escapeHtml(a.desc) + '</p>';
+        '<div class="icon">'  + (a.icon || '📂') + '</div>' +
+        '<div class="badge">' + escapeHtml(a.tag  || '')   + '</div>' +
+        '<h2>'                + escapeHtml(a.name || a.id) + '</h2>' +
+        '<p>'                 + escapeHtml(a.desc || '')   + '</p>';
       grid.appendChild(el);
     });
 
-    if (count === 0) {
+    if (apps.length === 0) {
       grid.innerHTML = '<p class="empty" style="grid-column:1/-1">' +
         '你的帐号目前没有可查看的报表，请联系管理员</p>';
     }
 
     document.getElementById("loading").classList.add("hidden");
     grid.classList.remove("hidden");
-  })
-  .catch(err => {
+  } catch (err) {
     console.error(err);
     showError("载入失败，请重新整理页面或联系管理员");
-  });
+  }
+}
+
+load();
 </script>
 </body>
 </html>

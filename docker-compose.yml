@@ -1,12 +1,15 @@
 # ─── 新東方數據平台 · Auth Gateway ──────────────────────────────
 # 唯一對外的入口；下游服務（8771、8772）請用雲安全組關閉外部訪問
 #
-# 修復後的變更:
+# v3 變更:
+#   ✅ 掛載 apps.yaml 到 auth-api 容器（/auth/apps 端點 + render_nginx.py 用）
+#   ✅ nginx.conf 由 deploy.sh 從 apps.yaml 渲染生成（新增看板只改 apps.yaml）
+#
+# v2 修復回顧:
 #   ✅ 去掉 version（Compose v2 已淘汰）
 #   ✅ users.yaml 改為可寫掛載（讓容器內的 manage.py 能直接寫）
-#   ✅ healthcheck 用輕量的 /auth/health（原本打 /auth/login 會渲染整個 HTML）
-#   ✅ 加 logging driver 限制 log 大小，避免塞爆磁碟
-#   ✅ gateway 加 healthcheck（用 wget，alpine 有）
+#   ✅ healthcheck 用輕量的 /auth/health
+#   ✅ 加 logging driver 限制 log 大小
 #   ✅ 網絡命名，方便日後把下游 join 進來
 
 services:
@@ -19,6 +22,8 @@ services:
     volumes:
       # users.yaml 可寫 — 讓容器內執行的 manage.py 能直接修改
       - ./users.yaml:/app/users.yaml
+      # apps.yaml 唯讀掛載（看板註冊表）
+      - ./apps.yaml:/app/apps.yaml:ro
     expose:
       - "8000"
     logging:
