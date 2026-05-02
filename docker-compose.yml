@@ -18,6 +18,7 @@ services:
     container_name: gw_auth
     restart: always
     environment:
+      TZ: Asia/Shanghai
       SECRET_KEY: ${SECRET_KEY:?請先執行 deploy.sh 生成 .env 文件}
     volumes:
       # users.yaml 可寫 — 讓容器內執行的 manage.py 能直接修改
