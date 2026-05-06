@@ -1,24 +1,22 @@
 """
-Auth Gateway API — 統一認證閘道（整合版 v3）
+Auth Gateway API — 統一認證閘道（v4 · 日誌精簡 + 詳細審計）
 ────────────────────────────────────────────────────────────────
-相對 v2 變更:
-  • 新增 /auth/apps 端點 — 從 apps.yaml 讀取看板清單，按當前
-    用戶的 gw_role.paths 過濾，供 portal.html 動態渲染卡片
-  • 新增 X-Auth-Extras header — 把 users.yaml 裡 user.extras
-    的任意 JSON 編碼傳給下游（新看板無需動 gateway 代碼即可
-    攜帶自己的配置，例如 hr 看板的部門白名單）
-  • finance 專用 header (X-Auth-Role / Dept-Scope / Advisor-Name
-    / Scope) 完全保留，finance 應用不需要任何修改
+v4 變更（相對 v3）:
+  • 新增 access middleware：每個業務請求記一行 key=value 結構化日誌
+    內容：user / role / ip / method / path / uri / status / dur_ms
+  • /auth/health 完全靜音（不寫任何 access 日誌）
+  • /auth/check 額外記錄真實下游 URI 與判定結果（forbidden / no_session）
+  • uvicorn 內建 access log 已在 Dockerfile 用 --no-access-log 關閉
+    所有 access 行都從這裡發出，格式可控、噪音可控
+
+v3 既有功能（保留）:
+  • /auth/apps 端點（從 apps.yaml 過濾出當前用戶可見看板）
+  • X-Auth-Extras header（通用 extras 透傳）
+  • finance 專用 header 完全保留（kiki_DAta_Analysis 兼容）
 
 對下游 FastAPI 合約（不變）:
-  X-Auth-User           登入用戶名（ASCII）
-  X-Auth-Gw-Role        Gateway 層角色（除錯用）
-  X-Auth-Role           finance 數據層角色 ADMIN/MANAGER/ADVISOR/SCOPED
-  X-Auth-Dept-Scope     URL-encoded 中文部門（僅 MANAGER 用）
-  X-Auth-Advisor-Name   URL-encoded 中文顧問名（僅 ADVISOR 用）
-  X-Auth-Scope          URL-encoded JSON（SCOPED 用）
-  X-Auth-Display-Name   URL-encoded 顯示名稱（可選）
-  X-Auth-Extras         URL-encoded JSON（通用，新看板自定義用）
+  X-Auth-User / X-Auth-Gw-Role / X-Auth-Role / X-Auth-Dept-Scope
+  X-Auth-Advisor-Name / X-Auth-Scope / X-Auth-Display-Name / X-Auth-Extras
 ────────────────────────────────────────────────────────────────
 """
 import os
@@ -35,13 +33,35 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from passlib.hash import bcrypt
 
-# ── 基礎設定 ────────────────────────────────────────────────
+# ── 日誌設定 ────────────────────────────────────────────────
+# 第一性原理：日誌只為「出事時還原現場」存在。
+# 設計：單行 key=value，方便 grep / awk，不引入結構化日誌庫。
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout,
 )
 log = logging.getLogger("auth-gateway")
+audit = logging.getLogger("auth-gateway.audit")  # 業務審計專用 logger
+
+# 健康檢查路徑：完全不寫日誌
+SILENT_PATHS = {"/auth/health"}
+
+
+def _kv(**kwargs) -> str:
+    """把任意 key=value 序列化成單行可 grep 字串。
+    None 與空字串自動忽略；含空格的 value 自動加引號。
+    """
+    parts = []
+    for k, v in kwargs.items():
+        if v is None or v == "":
+            continue
+        s = str(v)
+        if " " in s or "\t" in s:
+            s = '"' + s.replace('"', '\\"') + '"'
+        parts.append(f"{k}={s}")
+    return " ".join(parts)
+
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -231,6 +251,71 @@ def record_fail(ip: str):
 
 
 # ══════════════════════════════════════════════════════════
+#   訪問日誌 Middleware（中央集中記錄）
+# ══════════════════════════════════════════════════════════
+@app.middleware("http")
+async def access_log_middleware(request: Request, call_next):
+    """
+    每個業務請求記一行 access 日誌；健康檢查完全靜音。
+
+    記錄欄位（key=value，方便 grep）:
+      ts      - 時間戳（由 logging format 提供）
+      level   - INFO / WARNING
+      event   - access
+      method  - GET / POST
+      path    - /auth/check, /finance/xxx, ...
+      uri     - /auth/check 才有意義（X-Original-URI，下游真實 URI）
+      user    - 從 cookie session 解出來的登入用戶
+      role    - gateway role
+      dn      - display_name
+      ip      - 真實客戶端 IP
+      status  - HTTP 狀態碼
+      dur_ms  - 處理耗時毫秒
+
+    搜索範例:
+      grep 'user=zhang' app.log               # 某用戶所有操作
+      grep 'event=access.*status=403' app.log # 所有被擋的請求
+      grep 'uri=/finance' app.log             # finance 相關所有訪問
+    """
+    path = request.url.path
+
+    # 健康檢查完全靜音
+    if path in SILENT_PATHS:
+        return await call_next(request)
+
+    t0 = time.perf_counter()
+    response: Response = await call_next(request)
+    dur_ms = int((time.perf_counter() - t0) * 1000)
+
+    # 解 session（解失敗不影響主流程）
+    sess = get_session(request)
+    user = sess.get("u") if sess else None
+    role = sess.get("r") if sess else None
+    dn = sess.get("n") if sess else None
+
+    # /auth/check 的真實業務 URI 在 header 裡，比 path 更有審計價值
+    original_uri = request.headers.get("X-Original-URI") if path == "/auth/check" else None
+
+    level = logging.WARNING if response.status_code >= 400 else logging.INFO
+    audit.log(
+        level,
+        _kv(
+            event="access",
+            method=request.method,
+            path=path,
+            uri=original_uri,
+            user=user,
+            role=role,
+            dn=dn,
+            ip=get_client_ip(request),
+            status=response.status_code,
+            dur_ms=dur_ms,
+        ),
+    )
+    return response
+
+
+# ══════════════════════════════════════════════════════════
 #   路由
 # ══════════════════════════════════════════════════════════
 
@@ -247,7 +332,7 @@ def login_page(req: Request, error: str = ""):
 def login(req: Request, username: str = Form(), password: str = Form()):
     ip = get_client_ip(req)
     if is_rate_limited(ip):
-        log.warning("rate_limited ip=%s user=%s", ip, username)
+        audit.warning(_kv(event="rate_limited", user=username, ip=ip))
         return RedirectResponse("/auth/login?error=rate", 302)
 
     try:
@@ -261,25 +346,24 @@ def login(req: Request, username: str = Form(), password: str = Form()):
     if user and safe_verify(password, user.get("password_hash", "")):
         role = user.get("role", "viewer")
         if role not in cfg.get("roles", {}):
-            log.error("user '%s' has unknown role '%s'", username, role)
+            audit.error(_kv(event="login_fail", reason="unknown_role",
+                            user=username, role=role, ip=ip))
             record_fail(ip)
             return RedirectResponse("/auth/login?error=1", 302)
 
-        token = SER.dumps({
-            "u": username,
-            "r": role,
-            "n": user.get("display_name", username),
-        })
+        display = user.get("display_name", username)
+        token = SER.dumps({"u": username, "r": role, "n": display})
         resp = RedirectResponse("/portal", 302)
         resp.set_cookie(
             COOKIE, token,
             max_age=MAX_AGE, httponly=True, samesite="lax", path="/",
         )
-        log.info("login_ok user=%s role=%s ip=%s", username, role, ip)
+        audit.info(_kv(event="login_ok", user=username, role=role, dn=display, ip=ip))
         return resp
 
     record_fail(ip)
-    log.warning("login_fail user=%s ip=%s", username, ip)
+    audit.warning(_kv(event="login_fail", reason="bad_credentials",
+                      user=username, ip=ip))
     return RedirectResponse("/auth/login?error=1", 302)
 
 
@@ -287,7 +371,8 @@ def login(req: Request, username: str = Form(), password: str = Form()):
 def logout(req: Request):
     sess = get_session(req)
     if sess:
-        log.info("logout user=%s ip=%s", sess.get("u"), get_client_ip(req))
+        audit.info(_kv(event="logout", user=sess.get("u"),
+                       role=sess.get("r"), ip=get_client_ip(req)))
     resp = RedirectResponse("/auth/login", 302)
     resp.delete_cookie(COOKIE, path="/")
     return resp
@@ -298,9 +383,17 @@ def check(req: Request):
     """
     Nginx auth_request 子請求：放行時回傳 X-Auth-* headers。
     nginx 用 auth_request_set 抓取後再 proxy_set_header 給下游。
+
+    詳細審計：no_session / forbidden 在這裡顯式記原因，
+    access middleware 會再記一行整體狀態（status / dur_ms）。
+    兩條互補：這條告訴你「為什麼擋」，那條告訴你「整個請求耗時與結果」。
     """
     sess = get_session(req)
+    ip = get_client_ip(req)
+    uri = req.headers.get("X-Original-URI", "/")
+
     if not sess:
+        audit.warning(_kv(event="auth_no_session", uri=uri, ip=ip))
         return Response(status_code=401)
 
     try:
@@ -309,12 +402,12 @@ def check(req: Request):
         log.exception("check: load_cfg failed: %s", e)
         return Response(status_code=401)
 
-    uri = req.headers.get("X-Original-URI", "/")
     role = sess.get("r", "")
     allowed = cfg.get("roles", {}).get(role, [])
 
     if not path_allowed(uri, allowed):
-        log.info("forbidden user=%s role=%s uri=%s", sess.get("u"), role, uri)
+        audit.warning(_kv(event="forbidden", user=sess.get("u"), role=role,
+                          dn=sess.get("n"), uri=uri, ip=ip))
         return Response(status_code=403)
 
     # ── 身份注入 ──

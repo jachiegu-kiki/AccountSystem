@@ -11,6 +11,11 @@ render_nginx.py  —  從 apps.yaml 生成 nginx.conf
   • 所有 X-Auth-* header 都從 auth-api 子請求回傳並統一注入
     （apps 不需要知道有哪些 header，自取所需）
   • 產出的 nginx.conf 與手動維護的版本**逐行等效**
+
+v4 變更:
+  • PREAMBLE 加入 log_format detailed（IP/user/role/uri/status/耗時）
+  • 新增獨立 location = /auth/health 並 access_log off（健康檢查靜音）
+  • Portal 區塊抓 $auth_user / $auth_gw_role 給 log_format 用
 ────────────────────────────────────────────────────────────────
 """
 import os
@@ -72,6 +77,23 @@ PREAMBLE = """\
 #     請勿手動編輯 — 改動路由請改 apps.yaml，再跑 deploy.sh
 # ═══════════════════════════════════════════════════════════════
 
+# ── v4 訪問日誌格式（詳細審計用）────────────────────────────────
+# 比預設 combined 多了:
+#   $request_time       gateway 端到端耗時
+#   $upstream_response_time  下游耗時（定位是 nginx 慢還是下游慢）
+#   $upstream_status    下游真實狀態碼
+#   $auth_user / $auth_gw_role  從 /auth/check 子請求取出的身份
+#   $http_x_forwarded_for       穿透代理鏈的真實 IP
+log_format detailed escape=json
+    '$time_iso8601 ip=$remote_addr xff=$http_x_forwarded_for '
+    'user=$auth_user role=$auth_gw_role '
+    'method=$request_method uri="$request_uri" '
+    'status=$status upstream_status=$upstream_status '
+    'rt=$request_time urt=$upstream_response_time '
+    'bytes=$body_bytes_sent ref="$http_referer" ua="$http_user_agent"';
+
+access_log /var/log/nginx/access.log detailed;
+
 upstream auth_api {
     server auth-api:8000;
     keepalive 16;
@@ -116,6 +138,24 @@ server {
 """
 
 
+HEALTH_LOCATION = """\
+
+    # ══════════════════════════════════════════════════════════
+    #  健康檢查（完全靜音）
+    #  v4: 單獨 expose /auth/health 並關閉 access log
+    #  原因：docker-compose healthcheck 每 15s 打一次，這噪音對審計
+    #        毫無價值，必須在 nginx 側就過濾掉。
+    # ══════════════════════════════════════════════════════════
+
+    location = /auth/health {
+        access_log off;
+        proxy_pass                  http://auth_api;
+        proxy_set_header            Host              $http_host;
+        proxy_http_version          1.1;
+    }
+"""
+
+
 AUTH_LOCATION = """\
 
     # ══════════════════════════════════════════════════════════
@@ -135,23 +175,26 @@ AUTH_LOCATION = """\
 
 
 def render_portal() -> str:
-    """Portal 首頁（固定）"""
-    a_set = _auth_request_set_block()
-    return f"""\
+    """Portal 首頁（固定）— 抓最少身份變數供 log_format 用"""
+    return """\
 
     # ══════════════════════════════════════════════════════════
     #  Portal 首頁
     # ══════════════════════════════════════════════════════════
 
-    location = /portal {{
+    location = /portal {
         auth_request                /auth/check;
         error_page 401 = @login_redirect;
         error_page 403 = @forbidden;
 
+        # ── 身份注入（log_format 用 $auth_user / $auth_gw_role）──
+        auth_request_set $auth_user                $upstream_http_x_auth_user;
+        auth_request_set $auth_gw_role             $upstream_http_x_auth_gw_role;
+
         default_type                text/html;
         alias                       /usr/share/nginx/html/portal.html;
         add_header Cache-Control    "no-cache, no-store, must-revalidate" always;
-    }}
+    }
 """
 
 
@@ -321,6 +364,8 @@ def render(apps_yaml_path: str) -> str:
         if a.get("absolute_api_path"):
             parts.append(render_absolute_api_check(a))
 
+    # v4: 健康檢查 location 必須在 /auth/ 之前（更精確匹配優先）
+    parts.append(HEALTH_LOCATION)
     parts.append(AUTH_LOCATION)
     parts.append(render_portal())
 
