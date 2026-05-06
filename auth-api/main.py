@@ -1,18 +1,21 @@
 """
-Auth Gateway API — 統一認證閘道（v4 · 日誌精簡 + 詳細審計）
+Auth Gateway API — 統一認證閘道（v4.1 · 日誌 URI 自動解碼）
 ────────────────────────────────────────────────────────────────
-v4 變更（相對 v3）:
-  • 新增 access middleware：每個業務請求記一行 key=value 結構化日誌
-    內容：user / role / ip / method / path / uri / status / dur_ms
-  • /auth/health 完全靜音（不寫任何 access 日誌）
-  • /auth/check 額外記錄真實下游 URI 與判定結果（forbidden / no_session）
-  • uvicorn 內建 access log 已在 Dockerfile 用 --no-access-log 關閉
-    所有 access 行都從這裡發出，格式可控、噪音可控
+v4.1 變更（相對 v4）:
+  • 新增 _decode_uri()：日誌中的 URI 自動 percent-decode
+    例：%E8%B2%A1%E5%8B%99%E9%83%A8 → 財務部
+  • 同時過濾控制字元（\\r \\n \\t），防 log injection
+  • 權限判定（path_allowed）仍用原始 URI — 不影響安全邏輯
+
+v4 既有功能（保留）:
+  • access middleware：每個業務請求記一行 key=value 結構化日誌
+  • /auth/health 完全靜音
+  • /auth/check 額外記錄 forbidden / no_session 原因
 
 v3 既有功能（保留）:
-  • /auth/apps 端點（從 apps.yaml 過濾出當前用戶可見看板）
-  • X-Auth-Extras header（通用 extras 透傳）
-  • finance 專用 header 完全保留（kiki_DAta_Analysis 兼容）
+  • /auth/apps 端點
+  • X-Auth-Extras header
+  • finance 專用 header（kiki_DAta_Analysis 兼容）
 
 對下游 FastAPI 合約（不變）:
   X-Auth-User / X-Auth-Gw-Role / X-Auth-Role / X-Auth-Dept-Scope
@@ -25,7 +28,7 @@ import time
 import json
 import logging
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import yaml
 from fastapi import FastAPI, Request, Response, Form
@@ -34,7 +37,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from passlib.hash import bcrypt
 
 # ── 日誌設定 ────────────────────────────────────────────────
-# 第一性原理：日誌只為「出事時還原現場」存在。
+# 第一性原理：日誌只為「出事時還原現場」存在，所以必須讓人類能讀。
 # 設計：單行 key=value，方便 grep / awk，不引入結構化日誌庫。
 logging.basicConfig(
     level=logging.INFO,
@@ -46,6 +49,24 @@ audit = logging.getLogger("auth-gateway.audit")  # 業務審計專用 logger
 
 # 健康檢查路徑：完全不寫日誌
 SILENT_PATHS = {"/auth/health"}
+
+
+def _decode_uri(uri: Optional[str]) -> Optional[str]:
+    """把日誌裡的 URI percent-decode 成人類可讀。
+
+    例:
+      /finance/api/sales?dept=%E8%B2%A1%E5%8B%99%E9%83%A8
+      → /finance/api/sales?dept=財務部
+
+    防護:
+      - errors='replace' — 非法 UTF-8 自動換成 U+FFFD，不丟 exception
+      - 過濾控制字元（\\r \\n \\t 等 < 0x20 與 0x7F）
+        防止攻擊者在 query string 塞 %0A 偽造一行假日誌（log injection）
+    """
+    if not uri:
+        return uri
+    decoded = unquote(uri, encoding="utf-8", errors="replace")
+    return "".join(c for c in decoded if ord(c) >= 32 and ord(c) != 127)
 
 
 def _kv(**kwargs) -> str:
@@ -264,7 +285,7 @@ async def access_log_middleware(request: Request, call_next):
       event   - access
       method  - GET / POST
       path    - /auth/check, /finance/xxx, ...
-      uri     - /auth/check 才有意義（X-Original-URI，下游真實 URI）
+      uri     - /auth/check 才有意義（X-Original-URI，已 percent-decode）
       user    - 從 cookie session 解出來的登入用戶
       role    - gateway role
       dn      - display_name
@@ -276,6 +297,7 @@ async def access_log_middleware(request: Request, call_next):
       grep 'user=zhang' app.log               # 某用戶所有操作
       grep 'event=access.*status=403' app.log # 所有被擋的請求
       grep 'uri=/finance' app.log             # finance 相關所有訪問
+      grep 'dept=財務部' app.log               # 直接 grep 中文（v4.1 解碼後可用）
     """
     path = request.url.path
 
@@ -294,7 +316,10 @@ async def access_log_middleware(request: Request, call_next):
     dn = sess.get("n") if sess else None
 
     # /auth/check 的真實業務 URI 在 header 裡，比 path 更有審計價值
-    original_uri = request.headers.get("X-Original-URI") if path == "/auth/check" else None
+    # v4.1: 自動 percent-decode，中文部門/顧問名直接可讀
+    original_uri = None
+    if path == "/auth/check":
+        original_uri = _decode_uri(request.headers.get("X-Original-URI"))
 
     level = logging.WARNING if response.status_code >= 400 else logging.INFO
     audit.log(
@@ -387,13 +412,17 @@ def check(req: Request):
     詳細審計：no_session / forbidden 在這裡顯式記原因，
     access middleware 會再記一行整體狀態（status / dur_ms）。
     兩條互補：這條告訴你「為什麼擋」，那條告訴你「整個請求耗時與結果」。
+
+    v4.1: 權限判定用 uri_raw（未解碼），日誌記 uri_log（已解碼）
+          兩者分離 — 安全邏輯與可讀性互不干擾。
     """
     sess = get_session(req)
     ip = get_client_ip(req)
-    uri = req.headers.get("X-Original-URI", "/")
+    uri_raw = req.headers.get("X-Original-URI", "/")
+    uri_log = _decode_uri(uri_raw)
 
     if not sess:
-        audit.warning(_kv(event="auth_no_session", uri=uri, ip=ip))
+        audit.warning(_kv(event="auth_no_session", uri=uri_log, ip=ip))
         return Response(status_code=401)
 
     try:
@@ -405,9 +434,9 @@ def check(req: Request):
     role = sess.get("r", "")
     allowed = cfg.get("roles", {}).get(role, [])
 
-    if not path_allowed(uri, allowed):
+    if not path_allowed(uri_raw, allowed):
         audit.warning(_kv(event="forbidden", user=sess.get("u"), role=role,
-                          dn=sess.get("n"), uri=uri, ip=ip))
+                          dn=sess.get("n"), uri=uri_log, ip=ip))
         return Response(status_code=403)
 
     # ── 身份注入 ──
