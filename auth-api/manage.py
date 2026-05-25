@@ -14,7 +14,8 @@
   set-finance <username> <ADMIN|MANAGER|ADVISOR> [--dept <d>] [--advisor <a>]
   set-finance-scope <username> [--line a,b,..] [--sub-line ...]
                                [--biz-block a,b,..] [--group-l1 ...]
-                               [--group-advisor ...] [--biz-type 留学,多语]
+                               [--group-advisor ...] [--group-advisor-like ...]
+                               [--biz-type 留学,多语]
   unset-finance <username>
 
   # 查看
@@ -36,6 +37,12 @@ Finance role:            ADMIN / MANAGER / ADVISOR / SCOPED
   add wujiaheng ouya2026 manager 吳嘉恒
   set-finance-scope wujiaheng --line 欧洲,亚洲 --biz-block 欧亚,外包
 
+  # v5.3 新增：美妍負責人 — 条线=美妍 OR 顾问分组「包含」美研
+  #   group-advisor       → 等值匹配（值完全相等才放行）
+  #   group-advisor-like  → 子串匹配（secondary_group_advisor LIKE '%pat%'）
+  add meiyan_lead - manager 美妍負責人
+  set-finance-scope meiyan_lead --line 美妍 --group-advisor-like 美研
+
   # 老闆：gateway manager + 看全公司數據（預設推導，不用 set-finance）
   add boss - manager 老闆
 """
@@ -53,7 +60,8 @@ YAML_PATH = os.environ.get(
 )
 VALID_GW_ROLES = {"admin", "manager", "consultant", "advisor", "viewer"}
 VALID_FIN_ROLES = {"ADMIN", "MANAGER", "ADVISOR", "SCOPED"}
-VALID_SCOPE_DIMS = {"line", "sub_line", "biz_block", "group_l1", "group_advisor", "biz_type"}
+VALID_SCOPE_DIMS = {"line", "sub_line", "biz_block", "group_l1",
+                    "group_advisor", "group_advisor_like", "biz_type"}
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]{2,32}$")
 
 
@@ -268,20 +276,25 @@ def cmd_set_finance_scope(args):
     """設定多維度白名單（SCOPED 角色）
     用法: set-finance-scope <username> [--line a,b,..] [--sub-line ...]
                                         [--biz-block a,b,..] [--group-l1 ...]
-                                        [--group-advisor ...] [--biz-type 留学,多语]
+                                        [--group-advisor ...] [--group-advisor-like ...]
+                                        [--biz-type 留学,多语]
     第一性原理: scope 即「能看哪些 row」的多維謂詞，YAML 存的是白名單清單。
+    v5.3:     新增 --group-advisor-like — secondary_group_advisor LIKE '%pat%' 子串匹配，
+              與既有 --group-advisor 等值匹配獨立並存；維度間 OR。
     """
     flag_map = {
-        "--line":           "line",
-        "--sub-line":       "sub_line",
-        "--biz-block":      "biz_block",
-        "--group-l1":       "group_l1",
-        "--group-advisor":  "group_advisor",
-        "--biz-type":       "biz_type",
+        "--line":               "line",
+        "--sub-line":           "sub_line",
+        "--biz-block":          "biz_block",
+        "--group-l1":           "group_l1",
+        "--group-advisor":      "group_advisor",
+        "--group-advisor-like": "group_advisor_like",   # v5.3: 子串匹配
+        "--biz-type":           "biz_type",
     }
     positional, parsed = parse_flags(args, flag_map)
     if len(positional) < 1:
-        print("用法: set-finance-scope <username> [--line a,b] [--biz-block a,b] ...")
+        print("用法: set-finance-scope <username> [--line a,b] [--biz-block a,b] "
+              "[--group-advisor a,b] [--group-advisor-like 美研] ...")
         print(f"支援維度: {', '.join(sorted(VALID_SCOPE_DIMS))}")
         sys.exit(1)
     user = positional[0]
